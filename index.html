@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎄</text></svg>" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Arix Signature Tree</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700&family=Playfair+Display:ital,wght@0,400;1,400&display=swap" rel="stylesheet">
+    
+    <!-- Styles -->
+    <style>
+      body { margin: 0; overflow: hidden; background-color: #000502; }
+      /* Custom font classes for that luxury feel */
+      .font-serif-display { font-family: 'Playfair Display', serif; }
+      .font-cinzel { font-family: 'Cinzel', serif; }
+      
+      /* Animation utils */
+      @keyframes fade-in-down {
+        0% { opacity: 0; transform: translateY(-20px); }
+        100% { opacity: 1; transform: translateY(0); }
+      }
+      .animate-fade-in-down {
+        animation: fade-in-down 1s ease-out forwards;
+      }
+    </style>
+
+    <!-- Import Map for Modules -->
+    <script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@18.2.0",
+    "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+    "three": "https://esm.sh/three@0.160.0",
+    "@react-three/fiber": "https://esm.sh/@react-three/fiber@8.15.14?external=react,react-dom,three",
+    "@react-three/drei": "https://esm.sh/@react-three/drei@9.96.1?external=react,react-dom,three,@react-three/fiber",
+    "@react-three/postprocessing": "https://esm.sh/@react-three/postprocessing@2.16.0?external=react,react-dom,three,@react-three/fiber",
+    "uuid": "https://esm.sh/uuid",
+    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
+    "react/": "https://esm.sh/react@^19.2.3/"
+  }
+}
+</script>
+    
+    <!-- Babel for in-browser compilation -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <script type="text/babel" data-type="module" data-presets="react,typescript">
+      import React, { useState, useMemo, useRef, useLayoutEffect } from 'react';
+      import ReactDOM from 'react-dom/client';
+      import * as THREE from 'three';
+      import { Canvas, useFrame } from '@react-three/fiber';
+      import { OrbitControls, Environment, PerspectiveCamera, Stars } from '@react-three/drei';
+      import { EffectComposer, Bloom, Vignette, Noise } from '@react-three/postprocessing';
+
+      // ==========================================
+      // CONSTANTS & TYPES
+      // ==========================================
+
+      // Fixed: Use const object instead of enum for better Babel Standalone compatibility
+      const TreeState = {
+        SCATTERED: 'SCATTERED',
+        TREE_SHAPE: 'TREE_SHAPE',
+      };
+
+      // Aesthetic Palette
+      const COLORS = {
+        DEEP_EMERALD: new THREE.Color('#022b1c'),
+        BRIGHT_EMERALD: new THREE.Color('#005c3e'),
+        RICH_GOLD: new THREE.Color('#D4AF37'),
+        PALE_GOLD: new THREE.Color('#F9E5BC'),
+        GIFT_RED: new THREE.Color('#8a1c26'), // Slightly richer red
+        BACKGROUND: '#000502',
+      };
+
+      // Tree Dimensions
+      const TREE_CONFIG = {
+        HEIGHT: 14,
+        RADIUS_BASE: 5.5,
+        PARTICLE_COUNT: 15000,
+        ORNAMENT_COUNT: 600, // High density
+        SCATTER_RADIUS: 25,
+      };
+
+      const ANIMATION_SPEED = 1.5;
+
+      // ==========================================
+      // COMPONENT: FOLIAGE
+      // ==========================================
+
+      const vertexShader = `
+        uniform float uTime;
+        uniform float uProgress;
+        
+        attribute vec3 aScatterPosition;
+        attribute vec3 aTreePosition;
+        attribute float aRandom;
+        
+        varying float vAlpha;
+        varying float vRandom;
+
+        // Cubic Ease In Out function for smoother transitions
+        float easeInOutCubic(float x) {
+          return x < 0.5 ? 4.0 * x * x * x : 1.0 - pow(-2.0 * x + 2.0, 3.0) / 2.0;
+        }
+
+        void main() {
+          vRandom = aRandom;
+          
+          // Morph logic
+          float easedProgress = easeInOutCubic(uProgress);
+          vec3 targetPos = mix(aScatterPosition, aTreePosition, easedProgress);
+
+          // Add some "breathing" / wind noise
+          float noise = sin(uTime * 2.0 + aRandom * 10.0) * 0.1;
+          // Only breathe when fully assembled to keep scatter chaos clean, or reduce it
+          float breathingStrength = mix(0.2, 0.05, easedProgress); 
+          
+          targetPos.x += noise * breathingStrength;
+          targetPos.y += noise * breathingStrength;
+          targetPos.z += noise * breathingStrength;
+
+          vec4 mvPosition = modelViewMatrix * vec4(targetPos, 1.0);
+          
+          // Size attenuation
+          gl_PointSize = (40.0 * aRandom + 20.0) * (1.0 / -mvPosition.z);
+          
+          gl_Position = projectionMatrix * mvPosition;
+        }
+      `;
+
+      const fragmentShader = `
+        uniform vec3 uColorGreen;
+        uniform vec3 uColorGold;
+        
+        varying float vRandom;
+
+        void main() {
+          // Create a soft circular particle
+          vec2 center = gl_PointCoord - 0.5;
+          float dist = length(center);
+          float alpha = 1.0 - smoothstep(0.3, 0.5, dist);
+
+          if (alpha < 0.01) discard;
+
+          // Mix green and gold based on randomness to create texture
+          vec3 finalColor = mix(uColorGreen, uColorGold, step(0.9, vRandom));
+          
+          // Add a glowing core
+          finalColor += vec3(0.2) * (1.0 - dist * 2.0);
+
+          gl_FragColor = vec4(finalColor, alpha * 0.9); // Slightly transparent
+        }
+      `;
+
+      const Foliage = ({ treeState }) => {
+        const materialRef = useRef(null);
+        
+        // Data Generation
+        const { positions, scatterPositions, randoms } = useMemo(() => {
+          const count = TREE_CONFIG.PARTICLE_COUNT;
+          const positions = new Float32Array(count * 3); // Tree Shape
+          const scatterPositions = new Float32Array(count * 3); // Chaos Shape
+          const randoms = new Float32Array(count);
+
+          for (let i = 0; i < count; i++) {
+            // 1. Tree Cone Logic
+            const h = Math.random(); 
+            const r = TREE_CONFIG.RADIUS_BASE * (1 - h) + (Math.random() * 0.5); 
+            const theta = Math.random() * Math.PI * 2;
+            
+            const x = r * Math.cos(theta);
+            const y = (h * TREE_CONFIG.HEIGHT) - (TREE_CONFIG.HEIGHT / 2);
+            const z = r * Math.sin(theta);
+
+            positions[i * 3] = x;
+            positions[i * 3 + 1] = y;
+            positions[i * 3 + 2] = z;
+
+            // 2. Scatter Sphere Logic
+            const sr = TREE_CONFIG.SCATTER_RADIUS * Math.cbrt(Math.random());
+            const sTheta = Math.random() * Math.PI * 2;
+            const sPhi = Math.acos(2 * Math.random() - 1);
+
+            scatterPositions[i * 3] = sr * Math.sin(sPhi) * Math.cos(sTheta);
+            scatterPositions[i * 3 + 1] = sr * Math.sin(sPhi) * Math.sin(sTheta);
+            scatterPositions[i * 3 + 2] = sr * Math.cos(sPhi);
+
+            // 3. Random attribute
+            randoms[i] = Math.random();
+          }
+          
+          return { positions, scatterPositions, randoms };
+        }, []);
+
+        const uniforms = useMemo(() => ({
+          uTime: { value: 0 },
+          uProgress: { value: 0 },
+          uColorGreen: { value: COLORS.BRIGHT_EMERALD },
+          uColorGold: { value: COLORS.RICH_GOLD },
+        }), []);
+
+        useFrame((state, delta) => {
+          if (materialRef.current) {
+            materialRef.current.uniforms.uTime.value = state.clock.elapsedTime;
+            
+            const targetProgress = treeState === TreeState.TREE_SHAPE ? 1.0 : 0.0;
+            const currentProgress = materialRef.current.uniforms.uProgress.value;
+            
+            // Linear approach to target
+            const step = delta / ANIMATION_SPEED;
+            if (currentProgress < targetProgress) {
+              materialRef.current.uniforms.uProgress.value = Math.min(targetProgress, currentProgress + step);
+            } else if (currentProgress > targetProgress) {
+              materialRef.current.uniforms.uProgress.value = Math.max(targetProgress, currentProgress - step);
+            }
+          }
+        });
+
+        return (
+          <points>
+            <bufferGeometry>
+              <bufferAttribute
+                attach="attributes-position"
+                count={positions.length / 3}
+                array={positions}
+                itemSize={3}
+              />
+              <bufferAttribute
+                attach="attributes-aTreePosition"
+                count={positions.length / 3}
+                array={positions}
+                itemSize={3}
+              />
+              <bufferAttribute
+                attach="attributes-aScatterPosition"
+                count={scatterPositions.length / 3}
+                array={scatterPositions}
+                itemSize={3}
+              />
+              <bufferAttribute
+                attach="attributes-aRandom"
+                count={randoms.length}
+                array={randoms}
+                itemSize={1}
+              />
+            </bufferGeometry>
+            <shaderMaterial
+              ref={materialRef}
+              vertexShader={vertexShader}
+              fragmentShader={fragmentShader}
+              uniforms={uniforms}
+              transparent={true}
+              depthWrite={false}
+              blending={THREE.AdditiveBlending}
+            />
+          </points>
+        );
+      };
+
+      // ==========================================
+      // COMPONENT: ORNAMENTS
+      // ==========================================
+
+      const easeInOutCubic = (t) => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+
+      const Ornaments = ({ treeState }) => {
+        const sphereMeshRef = useRef(null);
+        const boxMeshRef = useRef(null);
+        const currentProgress = useRef(0);
+
+        // Data generation
+        const { spheres, boxes } = useMemo(() => {
+          const spheres = [];
+          const boxes = [];
+          const count = TREE_CONFIG.ORNAMENT_COUNT;
+
+          for (let i = 0; i < count; i++) {
+            const rand = Math.random();
+            
+            // Tree Position
+            const h = Math.random();
+            const r = (TREE_CONFIG.RADIUS_BASE * (1 - h)) * 0.85;
+            const theta = Math.random() * Math.PI * 2;
+            const treePos = new THREE.Vector3(
+              r * Math.cos(theta),
+              (h * TREE_CONFIG.HEIGHT) - (TREE_CONFIG.HEIGHT / 2),
+              r * Math.sin(theta)
+            );
+
+            // Scatter Position
+            const sr = TREE_CONFIG.SCATTER_RADIUS * (0.5 + Math.random() * 0.5);
+            const sTheta = Math.random() * Math.PI * 2;
+            const sPhi = Math.acos(2 * Math.random() - 1);
+            const scatterPos = new THREE.Vector3(
+              sr * Math.sin(sPhi) * Math.cos(sTheta),
+              sr * Math.sin(sPhi) * Math.sin(sTheta),
+              sr * Math.cos(sPhi)
+            );
+
+            const rotation = new THREE.Euler(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
+
+            // 40% Boxes (Gifts), 60% Spheres (Balls)
+            if (rand > 0.6) {
+              // BOXES (Gifts) - Mostly Red
+              const color = Math.random() > 0.15 ? COLORS.GIFT_RED : COLORS.RICH_GOLD;
+              boxes.push({
+                id: i,
+                scatterPosition: scatterPos,
+                treePosition: treePos,
+                rotation,
+                scale: 0.3 + Math.random() * 0.3,
+                type: 'box',
+                color: '#' + color.getHexString(),
+              });
+            } else {
+              // SPHERES (Balls) - Mix of Gold and Green
+              const color = Math.random() > 0.5 ? COLORS.RICH_GOLD : COLORS.BRIGHT_EMERALD;
+              spheres.push({
+                id: i,
+                scatterPosition: scatterPos,
+                treePosition: treePos,
+                rotation,
+                scale: 0.1 + Math.random() * 0.15, // Small balls
+                type: 'sphere',
+                color: '#' + color.getHexString(),
+              });
+            }
+          }
+          return { spheres, boxes };
+        }, []);
+
+        // Update Colors
+        useLayoutEffect(() => {
+          const tempColor = new THREE.Color();
+
+          if (sphereMeshRef.current) {
+            spheres.forEach((data, i) => {
+              tempColor.set(data.color);
+              sphereMeshRef.current.setColorAt(i, tempColor);
+            });
+            sphereMeshRef.current.instanceColor.needsUpdate = true;
+          }
+
+          if (boxMeshRef.current) {
+            boxes.forEach((data, i) => {
+              tempColor.set(data.color);
+              boxMeshRef.current.setColorAt(i, tempColor);
+            });
+            boxMeshRef.current.instanceColor.needsUpdate = true;
+          }
+        }, [spheres, boxes]);
+
+        useFrame((state, delta) => {
+          const dest = treeState === TreeState.TREE_SHAPE ? 1 : 0;
+          const step = delta / ANIMATION_SPEED;
+          
+          if (currentProgress.current < dest) {
+            currentProgress.current = Math.min(dest, currentProgress.current + step);
+          } else if (currentProgress.current > dest) {
+            currentProgress.current = Math.max(dest, currentProgress.current - step);
+          }
+
+          const eased = easeInOutCubic(currentProgress.current);
+          const dummy = new THREE.Object3D();
+          const time = state.clock.elapsedTime;
+
+          // Update Spheres
+          if (sphereMeshRef.current) {
+            spheres.forEach((data, i) => {
+              const pos = new THREE.Vector3().lerpVectors(data.scatterPosition, data.treePosition, eased);
+              dummy.position.copy(pos);
+              dummy.rotation.set(
+                data.rotation.x + time * 0.5,
+                data.rotation.y + time * 0.3,
+                data.rotation.z
+              );
+              dummy.scale.setScalar(data.scale);
+              dummy.updateMatrix();
+              sphereMeshRef.current.setMatrixAt(i, dummy.matrix);
+            });
+            sphereMeshRef.current.instanceMatrix.needsUpdate = true;
+          }
+
+          // Update Boxes
+          if (boxMeshRef.current) {
+            boxes.forEach((data, i) => {
+              const pos = new THREE.Vector3().lerpVectors(data.scatterPosition, data.treePosition, eased);
+              dummy.position.copy(pos);
+              dummy.rotation.set(
+                data.rotation.x + time * 0.2,
+                data.rotation.y + time * 0.4,
+                data.rotation.z
+              );
+              dummy.scale.setScalar(data.scale);
+              dummy.updateMatrix();
+              boxMeshRef.current.setMatrixAt(i, dummy.matrix);
+            });
+            boxMeshRef.current.instanceMatrix.needsUpdate = true;
+          }
+        });
+
+        return (
+          <group>
+            <instancedMesh
+              ref={sphereMeshRef}
+              args={[undefined, undefined, spheres.length]}
+              castShadow
+              receiveShadow
+            >
+              <sphereGeometry args={[1, 24, 24]} />
+              <meshStandardMaterial 
+                roughness={0.1}
+                metalness={0.9}
+                color="#ffffff"
+                emissive="#ffffff"
+                emissiveIntensity={0.1}
+              />
+            </instancedMesh>
+
+            <instancedMesh
+              ref={boxMeshRef}
+              args={[undefined, undefined, boxes.length]}
+              castShadow
+              receiveShadow
+            >
+              <boxGeometry args={[1, 1, 1]} />
+              <meshStandardMaterial 
+                roughness={0.2}
+                metalness={0.6}
+                color="#ffffff"
+              />
+            </instancedMesh>
+          </group>
+        );
+      };
+
+      // ==========================================
+      // COMPONENT: SCENE
+      // ==========================================
+
+      const MovingCamera = ({ treeState }) => {
+        const ref = useRef(null);
+        
+        useFrame((state) => {
+          if (!ref.current) return;
+          
+          const time = state.clock.elapsedTime;
+          const x = Math.sin(time * 0.1) * 2;
+          ref.current.position.x += (x - ref.current.position.x) * 0.01;
+          ref.current.lookAt(0, 0, 0);
+        });
+
+        return (
+            <PerspectiveCamera 
+              makeDefault 
+              ref={ref} 
+              position={[0, 2, 35]} 
+              fov={45} 
+            />
+        );
+      }
+
+      const Scene = ({ treeState }) => {
+        return (
+          <Canvas
+            dpr={[1, 2]}
+            gl={{ 
+              antialias: false,
+              toneMapping: THREE.ACESFilmicToneMapping,
+              toneMappingExposure: 1.2
+            }}
+            shadows
+          >
+            <color attach="background" args={[COLORS.BACKGROUND]} />
+            
+            <MovingCamera treeState={treeState} />
+            <OrbitControls 
+              enablePan={false} 
+              enableZoom={true} 
+              minDistance={10} 
+              maxDistance={60}
+              maxPolarAngle={Math.PI / 1.5}
+              autoRotate={treeState === TreeState.TREE_SHAPE}
+              autoRotateSpeed={0.5}
+            />
+
+            <ambientLight intensity={0.2} color="#001100" />
+            
+            <spotLight 
+              position={[20, 30, 10]} 
+              angle={0.3} 
+              penumbra={1} 
+              intensity={800} 
+              color={COLORS.RICH_GOLD} 
+              castShadow 
+            />
+            
+            <pointLight position={[-20, 10, -10]} intensity={400} color={COLORS.BRIGHT_EMERALD} />
+            
+            <pointLight position={[0, -10, 20]} intensity={100} color="#ffaa00" />
+
+            <Environment preset="city" background={false} />
+            
+            <Stars radius={100} depth={50} count={5000} factor={4} saturation={0} fade speed={1} />
+
+            <group position={[0, -2, 0]}>
+              <Foliage treeState={treeState} />
+              <Ornaments treeState={treeState} />
+              
+              <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -TREE_CONFIG.HEIGHT/2 - 2, 0]} receiveShadow>
+                <planeGeometry args={[100, 100]} />
+                <meshStandardMaterial 
+                  color="#000000" 
+                  roughness={0.1} 
+                  metalness={0.8} 
+                />
+              </mesh>
+            </group>
+
+            <EffectComposer disableNormalPass>
+              <Bloom 
+                luminanceThreshold={0.5} 
+                luminanceSmoothing={0.9} 
+                intensity={1.5} 
+                radius={0.7}
+                mipmapBlur
+              />
+              <Vignette eskil={false} offset={0.1} darkness={0.6} />
+              <Noise opacity={0.02} />
+            </EffectComposer>
+          </Canvas>
+        );
+      };
+
+      // ==========================================
+      // COMPONENT: APP
+      // ==========================================
+
+      const App = () => {
+        const [treeState, setTreeState] = useState(TreeState.TREE_SHAPE);
+
+        const toggleState = () => {
+          setTreeState((prev) => 
+            prev === TreeState.TREE_SHAPE ? TreeState.SCATTERED : TreeState.TREE_SHAPE
+          );
+        };
+
+        return (
+          <div className="relative w-full h-screen bg-black text-white overflow-hidden select-none">
+            
+            {/* 3D Canvas Layer */}
+            <div className="absolute inset-0 z-0">
+              <Scene treeState={treeState} />
+            </div>
+
+            {/* UI Overlay Layer */}
+            <div className="absolute inset-0 z-10 pointer-events-none flex flex-col justify-between p-8 md:p-12">
+              
+              {/* Header */}
+              <header className="flex flex-col items-center md:items-start space-y-2 animate-fade-in-down">
+                <div className="flex items-center gap-4">
+                  <div className="w-12 h-[1px] bg-amber-400/50 hidden md:block"></div>
+                  <h3 className="font-cinzel text-amber-400 tracking-[0.3em] text-xs uppercase">
+                    The Arix Collection
+                  </h3>
+                  <div className="w-12 h-[1px] bg-amber-400/50 hidden md:block"></div>
+                </div>
+                <h1 className="font-serif-display text-4xl md:text-6xl text-transparent bg-clip-text bg-gradient-to-r from-emerald-100 via-white to-amber-100 drop-shadow-[0_0_15px_rgba(255,255,255,0.3)]">
+                  Signature Tree
+                </h1>
+              </header>
+
+              {/* Controls */}
+              <div className="flex flex-col items-center gap-6 pb-8 pointer-events-auto">
+                
+                <p className="font-cinzel text-emerald-200/60 text-xs tracking-widest text-center max-w-md">
+                  EXPERIENCE THE DUALITY OF CHAOS AND ORDER
+                </p>
+
+                <button
+                  onClick={toggleState}
+                  className={`
+                    group relative px-12 py-4 
+                    overflow-hidden transition-all duration-700 ease-out
+                    border border-amber-500/30 bg-black/40 backdrop-blur-md
+                    hover:border-amber-400 hover:bg-emerald-950/50
+                  `}
+                >
+                  <div className="absolute inset-0 bg-amber-500/10 opacity-0 group-hover:opacity-100 transition-opacity duration-500 blur-xl"></div>
+                  
+                  <span className={`
+                    relative z-10 font-cinzel text-sm tracking-[0.2em] font-bold
+                    bg-gradient-to-r bg-clip-text text-transparent transition-all duration-500
+                    ${treeState === TreeState.TREE_SHAPE 
+                      ? 'from-amber-200 via-amber-100 to-amber-300' 
+                      : 'from-emerald-300 via-emerald-100 to-teal-300'}
+                  `}>
+                    {treeState === TreeState.TREE_SHAPE ? 'SCATTER ESSENCE' : 'GATHER SPIRIT'}
+                  </span>
+
+                  <div className="absolute top-0 left-0 w-full h-[1px] bg-gradient-to-r from-transparent via-amber-500/50 to-transparent transform scale-x-0 group-hover:scale-x-100 transition-transform duration-700"></div>
+                  <div className="absolute bottom-0 left-0 w-full h-[1px] bg-gradient-to-r from-transparent via-amber-500/50 to-transparent transform scale-x-0 group-hover:scale-x-100 transition-transform duration-700 delay-100"></div>
+                </button>
+              </div>
+
+              {/* Footer */}
+              <div className="hidden md:flex justify-between items-end w-full opacity-40 text-[10px] font-mono text-emerald-100/50">
+                <div>
+                  COORDS: {treeState === TreeState.TREE_SHAPE ? 'CONICAL_PROJECTION' : 'SPHERICAL_DISPERSION'}<br/>
+                  LUX_LEVEL: 100%
+                </div>
+                <div className="text-right">
+                  ARIX INTERACTIVE © 2024<br/>
+                  WINTER EXHIBITION
+                </div>
+              </div>
+
+            </div>
+          </div>
+        );
+      };
+
+      // ==========================================
+      // MOUNT
+      // ==========================================
+      const rootElement = document.getElementById('root');
+      const root = ReactDOM.createRoot(rootElement);
+      root.render(
+        <React.StrictMode>
+          <App />
+        </React.StrictMode>
+      );
+    </script>
+  </body>
+</html>
